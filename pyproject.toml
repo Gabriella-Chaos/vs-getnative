@@ -18,6 +18,10 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+  "vapoursynth",
+  "numpy",
+]
 
 [project.urls]
 Homepage = "https://github.com/Gabriella-Chaos/vs-getnative"
