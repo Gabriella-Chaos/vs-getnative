@@ -242,7 +242,7 @@ class GetNative:
             else:
                 self.resolutions.append(current)
 
-        bob_idx = np.argmin(np.array(vals)[self.resolutions])
+        bob_idx = np.argmax(np.array(ratios)[self.resolutions])  # picked out to integrate other metrics
         bob = vals[bob_idx]
         bob_resolution = self.resolutions[bob_idx] * self.steps + self.min_h
 

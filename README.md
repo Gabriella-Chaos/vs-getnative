@@ -101,7 +101,9 @@ Output TXT (summary):
 
 | Property | Description | Default value | Type |
 | -------- | ----------- | ------------------ | ---- |
-| frame | Specify a frame for the analysis. | num_frames//3 | Int |
+| start | Specify a starting frame for the analysis. | 0 | Int |
+| end | Specify the last frame for the analysis. | Last Frame of Video | Int |
+| samples | Specify number of frame samples for the analysis. | 5 | Int |
 | kernel | Resize kernel to be used | bicubic | String |
 | bicubic-b | B parameter of bicubic resize | 1/3 | Float |
 | bicubic-c | C parameter of bicubic resize | 1/3 | Float |
@@ -137,8 +139,4 @@ to automatically recognize 1080p productions.
 Use your eyes or anibin if necessary.
   
 # Thanks  
-BluBb_mADe, kageru, FichteFoll, stux!, LittlePox
-
-# Help?
-
-Join https://discord.gg/UERrfucRFD (Ask in #encode-autism for help)
+BluBb_mADe, kageru, FichteFoll, stux!, LittlePox, infi
