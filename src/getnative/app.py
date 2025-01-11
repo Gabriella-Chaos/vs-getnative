@@ -499,7 +499,7 @@ async def getnative(args: Union[List, argparse.Namespace], src: vapoursynth.Vide
     gc.collect()
     print(
         f"\n{scaler} AR: {float(w) / h:.2f} "
-        f"{h} x {w} "
+        f"{w} x {h} "
         f"MAE: {mae}"
     )
 
@@ -548,12 +548,17 @@ def _getnative():
             mae_dict[str(scaler)] = mae
             ub_dict[str(scaler)] = near_ub
 
-    best_scaler = min(mae_dict, key=mae_dict.get)
+    if len(res_dict) > 0:
 
-    print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler][1], " x ", res_dict[best_scaler][0])
+        best_scaler = min(mae_dict, key=mae_dict.get)
 
-    if ub_dict[best_scaler]:
-        print("WARNING: the resolution above is close to the upper bound, suggesting that the input clip's resolution might already be its native resolution.")
+        print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler][1], " x ", res_dict[best_scaler][0])
+
+        if ub_dict[best_scaler]:
+            print("WARNING: the resolution above is close to the upper bound, suggesting that the input clip's resolution might already be its native resolution.")
+
+    else:
+        print("The estimation does not converge. Your input clip might be over-stretched.")
 
 
 parser = argparse.ArgumentParser(description='Find the native resolution(s) of upscaled material (mostly anime)')
