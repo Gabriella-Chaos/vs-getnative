@@ -490,6 +490,12 @@ async def getnative(args: Union[List, argparse.Namespace], src: vapoursynth.Vide
     except ValueError as err:
         raise GetnativeException(f"Error in getnative: {err}")
 
+
+    if h > args.max_h - args.ub_thr:
+        near_ub = True
+    else:
+        near_ub = False
+
     gc.collect()
     print(
         f"\n{scaler} AR: {float(w) / h:.2f} "
@@ -497,7 +503,7 @@ async def getnative(args: Union[List, argparse.Namespace], src: vapoursynth.Vide
         f"MAE: {mae}"
     )
 
-    return (h, w), mae, overstretched
+    return (h, w), mae, overstretched, near_ub
 
 
 def _getnative():
@@ -526,23 +532,28 @@ def _getnative():
 
     mae_dict = {}
     res_dict = {}
+    ub_dict = {}
 
     loop = asyncio.get_event_loop()
     for i, scaler in enumerate(mode):
         if scaler is not None and scaler.plugin is None:
             print(f"Warning: No correct descale version found for {scaler}, continuing with next scaler when available.")
             continue
-        res, mae, overstretched = loop.run_until_complete(
+        res, mae, overstretched, near_ub = loop.run_until_complete(
             getnative(args, src, scaler, first_time=True if i == 0 else False)
         )
 
         if not overstretched:
             res_dict[str(scaler)] = res
             mae_dict[str(scaler)] = mae
+            ub_dict[str(scaler)] = near_ub
 
     best_scaler = min(mae_dict, key=mae_dict.get)
 
-    print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler][0], " x ", res_dict[best_scaler][1])
+    print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler][1], " x ", res_dict[best_scaler][0])
+
+    if ub_dict[best_scaler]:
+        print("WARNING: the resolution above is close to the upper bound, suggesting that the input clip's resolution might already be its native resolution.")
 
 
 parser = argparse.ArgumentParser(description='Find the native resolution(s) of upscaled material (mostly anime)')
@@ -557,6 +568,7 @@ parser.add_argument('--lanczos-taps', '-t', dest='taps', type=int, default=3, he
 parser.add_argument('--aspect-ratio', '-ar', dest='ar', type=to_float, default=0, help='Force aspect ratio. Only useful for anamorphic input')
 parser.add_argument('--min-height', '-min', dest="min_h", type=int, default=-1, help='Minimum height to consider')
 parser.add_argument('--max-height', '-max', dest="max_h", type=int, default=-1, help='Maximum height to consider')
+parser.add_argument('--ub-thr', '-ut', dest="ub_thr", type=int, default=10, help='Upper Bound Warning')
 parser.add_argument('--output-mask', '-mask', dest='mask_out', action="store_true", default=False, help='Save detail mask as png')
 parser.add_argument('--plot-scaling', '-ps', dest='plot_scaling', type=str.lower, default='log', help='Scaling of the y axis. Can be "linear" or "log"')
 parser.add_argument('--plot-format', '-pf', dest='plot_format', type=str.lower, default='svg', help='Format of the output image. Specify multiple formats separated by commas. Can be svg, png, pdf, rgba, jp(e)g, tif(f), and probably more')
