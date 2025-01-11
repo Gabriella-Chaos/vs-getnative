@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
   "vapoursynth",
   "numpy",
+  "scipy",
 ]
 
 [project.urls]

@@ -10,6 +10,7 @@ from typing import Union, List, Tuple, Any
 from getnative.utils import GetnativeException, get_attr, get_source_filter, to_float
 
 import numpy as np
+from scipy.optimize import dual_annealing
 
 PLOT_ENABLED = True
 
@@ -120,7 +121,7 @@ common_scaler = {
 
 
 class GetNative:
-    def __init__(self, src, scaler, ar, min_h, max_h, frames, mask_out, plot_scaling, plot_format, show_plot, no_save,
+    def __init__(self, src, scaler, ar, min_h, max_h, frames, passes, mask_out, plot_scaling, plot_format, show_plot, no_save,
                  steps, output_dir):
         self.plot_format = plot_format
         self.plot_scaling = plot_scaling
@@ -130,6 +131,7 @@ class GetNative:
         self.ar = ar
         self.scaler = scaler
         self.frames = frames
+        self.passes = passes
         self.mask_out = mask_out
         self.show_plot = show_plot
         self.no_save = no_save
@@ -140,10 +142,117 @@ class GetNative:
         self.filename = self.get_filename()
 
     async def run(self):
+
+        # h, w, mae = self.getar()
+
+        # self.ar = float(w) / h
+
+        # if PLOT_ENABLED:
+
         # change format to GrayS with bitdepth 32 for descale
-        sampled_vals = 0.
         sample_size = len(self.frames)
         hs = list(range(self.min_h, self.max_h + 1, self.steps))
+        ar = self.ar
+
+        for p in range(self.passes):
+
+            sampled_vals = 0.
+
+            for frame in self.frames:
+                src = self.src[frame.item()]
+                matrix_s = '709' if src.format.color_family == vapoursynth.RGB else None
+                src_luma32 = core.resize.Point(src, format=vapoursynth.YUV444PS, matrix_s=matrix_s)
+                src_luma32 = core.std.ShufflePlanes(src_luma32, 0, vapoursynth.GRAY)
+                # src_luma32 = core.std.Cache(src_luma32)  # Cache method no longer available/possible
+
+                # descale each individual frame
+                clip_list = [self.scaler.descaler(src_luma32, self.getw(h, not src.width&1), h) # allow odd resolutions for odd input
+                             for h in range(self.min_h, self.max_h + 1, self.steps)]
+                full_clip = core.std.Splice(clip_list, mismatch=True)
+                full_clip = self.scaler.upscaler(full_clip, src.width, src.height)
+                if self.ar != src.width / src.height:
+                    src_luma32 = self.scaler.upscaler(src_luma32, src.width, src.height)
+                expr_full = core.std.Expr([src_luma32 * full_clip.num_frames, full_clip], 'x y - abs dup 0.015 > swap 0 ?')
+                full_clip = core.std.CropRel(expr_full, 5, 5, 5, 5)
+                full_clip = core.std.PlaneStats(full_clip)
+                # full_clip = core.std.Cache(full_clip)  # Cache method no longer available/possible
+
+                tasks_pending = set()
+                futures = {}
+                vals = []
+                full_clip_len = len(full_clip)
+                for frame_index in range(len(full_clip)):
+                    print(f"\r{frame_index}/{full_clip_len-1}", end="")
+                    fut = asyncio.ensure_future(asyncio.wrap_future(full_clip.get_frame_async(frame_index)))
+                    tasks_pending.add(fut)
+                    futures[fut] = frame_index
+                    while len(tasks_pending) >= core.num_threads + 2:
+                        tasks_done, tasks_pending = await asyncio.wait(tasks_pending, return_when=asyncio.FIRST_COMPLETED)
+                        vals += [(futures.pop(task), task.result().props.PlaneStatsAverage) for task in tasks_done]
+
+                tasks_done, _ = await asyncio.wait(tasks_pending)
+                vals += [(futures.pop(task), task.result().props.PlaneStatsAverage) for task in tasks_done]
+                vals = [v for _, v in sorted(vals)]
+                sampled_vals = np.array(vals) + sampled_vals
+
+            vals = sampled_vals
+            vals = vals / sample_size
+            vals = vals.tolist()
+
+            ratios, vals, best_value, bob_mae, bob_resolution = self.analyze_results(vals, self.min_h)
+
+            h = bob_resolution
+            w_min = int((self.ar - 0.2) * h)
+            w_max = min(int(float(self.src.width) * 9 / 10), int((self.ar + 0.2) * h))
+            w_sample_size = int((w_max - w_min) // self.steps)
+            sampled_vals = 0.
+
+            for frame in self.frames:
+                src = self.src[frame.item()]
+                matrix_s = '709' if src.format.color_family == vapoursynth.RGB else None
+                src_luma32 = core.resize.Point(src, format=vapoursynth.YUV444PS, matrix_s=matrix_s)
+                src_luma32 = core.std.ShufflePlanes(src_luma32, 0, vapoursynth.GRAY)
+                # src_luma32 = core.std.Cache(src_luma32)  # Cache method no longer available/possible
+
+                # descale each individual frame
+                clip_list = [self.scaler.descaler(src_luma32, w, h) # allow odd resolutions for odd input
+                             for w in range(w_min, w_max + 1, self.steps)]
+                full_clip = core.std.Splice(clip_list, mismatch=True)
+                full_clip = self.scaler.upscaler(full_clip, src.width, src.height)
+                if self.ar != src.width / src.height:
+                    src_luma32 = self.scaler.upscaler(src_luma32, src.width, src.height)
+                expr_full = core.std.Expr([src_luma32 * full_clip.num_frames, full_clip], 'x y - abs dup 0.015 > swap 0 ?')
+                full_clip = core.std.CropRel(expr_full, 5, 5, 5, 5)
+                full_clip = core.std.PlaneStats(full_clip)
+                # full_clip = core.std.Cache(full_clip)  # Cache method no longer available/possible
+
+                tasks_pending = set()
+                futures = {}
+                vals = []
+                full_clip_len = len(full_clip)
+                for frame_index in range(len(full_clip)):
+                    print(f"\r{frame_index}/{full_clip_len-1}", end="")
+                    fut = asyncio.ensure_future(asyncio.wrap_future(full_clip.get_frame_async(frame_index)))
+                    tasks_pending.add(fut)
+                    futures[fut] = frame_index
+                    while len(tasks_pending) >= core.num_threads + 2:
+                        tasks_done, tasks_pending = await asyncio.wait(tasks_pending, return_when=asyncio.FIRST_COMPLETED)
+                        vals += [(futures.pop(task), task.result().props.PlaneStatsAverage) for task in tasks_done]
+
+                tasks_done, _ = await asyncio.wait(tasks_pending)
+                vals += [(futures.pop(task), task.result().props.PlaneStatsAverage) for task in tasks_done]
+                vals = [v for _, v in sorted(vals)]
+                sampled_vals = np.array(vals) + sampled_vals
+
+            vals = sampled_vals
+            vals = vals / w_sample_size
+            vals = vals / np.convolve(vals, [0.5, 0., 0.5], 'same')
+            vals = vals.tolist()
+
+            best_w = np.argmin(vals) * self.steps + w_min
+            self.ar = float(best_w) / h
+
+        sampled_vals = 0.
 
         for frame in self.frames:
             src = self.src[frame.item()]
@@ -184,7 +293,9 @@ class GetNative:
 
         vals = (sampled_vals / sample_size).tolist()
 
-        ratios, vals, best_value, bob_mae, bob_resolution = self.analyze_results(vals)
+        ratios, vals, best_value, bob_mae, bob_resolution = self.analyze_results(vals, self.min_h)
+
+
         print("\n")  # move the cursor, so that you not start at the end of the progress bar
 
         self.txt_output += 'Raw data:\nResolution\t | Relative Error\t | Relative difference from last\n'
@@ -212,7 +323,14 @@ class GetNative:
         else:
             plot = None
 
-        return best_value, plot, self.resolutions, bob_mae, bob_resolution
+        h = bob_resolution
+        w = self.getw(bob_resolution)
+        if w > h * (ar + 0.2):
+            overstretched = True
+        else:
+            overstretched = False
+
+        return bob_resolution, self.getw(bob_resolution), bob_mae, overstretched
 
     def getw(self, h, only_even=True):
         w = h * self.ar
@@ -220,9 +338,9 @@ class GetNative:
         if only_even:
             w = w // 2 * 2
 
-        return w
+        return min(w, self.src.width)
 
-    def analyze_results(self, vals):
+    def analyze_results(self, vals, offset):
         ratios = [0.0]
         for i in range(1, len(vals)):
             last = vals[i - 1]
@@ -244,11 +362,11 @@ class GetNative:
 
         bob_idx = np.argmax(np.array(ratios)[self.resolutions])  # picked out to integrate other metrics
         bob = vals[bob_idx]
-        bob_resolution = self.resolutions[bob_idx] * self.steps + self.min_h
+        bob_resolution = self.resolutions[bob_idx] * self.steps + offset
 
         best_values = (
             f"Native resolution(s) (best guess): "
-            f"{'p, '.join([str(r * self.steps + self.min_h) for r in self.resolutions])}p."
+            f"{'p, '.join([str(r * self.steps + offset) for r in self.resolutions])}p."
             f" Best of bests: {bob_resolution}p, mae: {bob}"
         )
         self.txt_output = (
@@ -352,6 +470,11 @@ async def getnative(args: Union[List, argparse.Namespace], src: vapoursynth.Vide
     if args.ar == 0:
         args.ar = src.width / src.height
 
+    if args.min_h < 0:
+        args.min_h = int(src.height // 2)
+    if args.max_h < 0:
+        args.max_h = int(src.height * 9 // 10)
+
     if args.min_h >= src.height:
         raise GetnativeException(f"Input image {src.height} is smaller min_h {args.min_h}")
     elif args.min_h >= args.max_h:
@@ -360,20 +483,21 @@ async def getnative(args: Union[List, argparse.Namespace], src: vapoursynth.Vide
         print(f"The image height is {src.height}, going higher is stupid! New max_h {src.height}")
         args.max_h = src.height
 
-    getn = GetNative(src, scaler, args.ar, args.min_h, args.max_h, frames, args.mask_out, args.plot_scaling,
+    getn = GetNative(src, scaler, args.ar, args.min_h, args.max_h, frames, args.passes, args.mask_out, args.plot_scaling,
                      args.plot_format, args.show_plot, args.no_save, args.steps, output_dir)
     try:
-        best_value, plot, resolutions, mmae, bob_resolution = await getn.run()
+        h, w, mae, overstretched = await getn.run()
     except ValueError as err:
         raise GetnativeException(f"Error in getnative: {err}")
 
     gc.collect()
     print(
-        f"\n{scaler} AR: {args.ar:.2f} Steps: {args.steps}\n"
-        f"{best_value}\n"
+        f"\n{scaler} AR: {float(w) / h:.2f} "
+        f"{h} x {w} "
+        f"MAE: {mae}"
     )
 
-    return best_value, plot, getn, mmae, bob_resolution
+    return (h, w), mae, overstretched
 
 
 def _getnative():
@@ -400,7 +524,7 @@ def _getnative():
     elif args.mode == "all":
         mode = [s for scaler in common_scaler.values() for s in scaler]
 
-    mmae_dict = {}
+    mae_dict = {}
     res_dict = {}
 
     loop = asyncio.get_event_loop()
@@ -408,28 +532,31 @@ def _getnative():
         if scaler is not None and scaler.plugin is None:
             print(f"Warning: No correct descale version found for {scaler}, continuing with next scaler when available.")
             continue
-        bv, plot, getn, mmae, res = loop.run_until_complete(
+        res, mae, overstretched = loop.run_until_complete(
             getnative(args, src, scaler, first_time=True if i == 0 else False)
         )
-        res_dict[str(scaler)] = res
-        mmae_dict[str(scaler)] = mmae
 
-    best_scaler = min(mmae_dict, key=mmae_dict.get)
+        if not overstretched:
+            res_dict[str(scaler)] = res
+            mae_dict[str(scaler)] = mae
 
-    print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler], "p")
+    best_scaler = min(mae_dict, key=mae_dict.get)
+
+    print("Native scaling best guess: ", best_scaler, " ", res_dict[best_scaler][0], " x ", res_dict[best_scaler][1])
 
 
 parser = argparse.ArgumentParser(description='Find the native resolution(s) of upscaled material (mostly anime)')
 parser.add_argument('--start', '-s', dest='fstart', type=int, default=0, help='Specify a starting frame')
 parser.add_argument('--end', '-e', dest='fend', type=int, default=None, help='Specify a ending frame')
 parser.add_argument('--samples', '-n', dest='fsamples', type=int, default=5, help='Specify sample size')
+parser.add_argument('--passes', '-p', dest='passes', type=int, default=3, help='Specify sample size')
 parser.add_argument('--kernel', '-k', dest='kernel', type=str.lower, default="bicubic", help='Resize kernel to be used')
 parser.add_argument('--bicubic-b', '-b', dest='b', type=to_float, default="1/3", help='B parameter of bicubic resize')
 parser.add_argument('--bicubic-c', '-c', dest='c', type=to_float, default="1/3", help='C parameter of bicubic resize')
 parser.add_argument('--lanczos-taps', '-t', dest='taps', type=int, default=3, help='Taps parameter of lanczos resize')
 parser.add_argument('--aspect-ratio', '-ar', dest='ar', type=to_float, default=0, help='Force aspect ratio. Only useful for anamorphic input')
-parser.add_argument('--min-height', '-min', dest="min_h", type=int, default=500, help='Minimum height to consider')
-parser.add_argument('--max-height', '-max', dest="max_h", type=int, default=1000, help='Maximum height to consider')
+parser.add_argument('--min-height', '-min', dest="min_h", type=int, default=-1, help='Minimum height to consider')
+parser.add_argument('--max-height', '-max', dest="max_h", type=int, default=-1, help='Maximum height to consider')
 parser.add_argument('--output-mask', '-mask', dest='mask_out', action="store_true", default=False, help='Save detail mask as png')
 parser.add_argument('--plot-scaling', '-ps', dest='plot_scaling', type=str.lower, default='log', help='Scaling of the y axis. Can be "linear" or "log"')
 parser.add_argument('--plot-format', '-pf', dest='plot_format', type=str.lower, default='svg', help='Format of the output image. Specify multiple formats separated by commas. Can be svg, png, pdf, rgba, jp(e)g, tif(f), and probably more')
